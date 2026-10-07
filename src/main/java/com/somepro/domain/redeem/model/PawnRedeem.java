@@ -8,10 +8,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
 
 /**
  * 赎当结算聚合根（纯领域对象，不带任何持久化注解）。
@@ -35,9 +32,6 @@ import java.time.temporal.ChronoUnit;
 @Getter
 @Setter
 public class PawnRedeem extends BaseEntity {
-
-    /** 日费率分母：月利率、月综合费率都是「每月」口径，折成每天除以 30。 */
-    private static final BigDecimal DAYS_PER_MONTH = BigDecimal.valueOf(30);
 
     private Long id;
 
@@ -73,41 +67,21 @@ public class PawnRedeem extends BaseEntity {
             throw new BizException("只有在当的当票才能赎当，当前状态："
                     + (ticket.getStatus() == null ? "-" : ticket.getStatus().label()));
         }
-        if (ticket.getPawnAmount() == null || ticket.getPawnAmount().compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BizException("当票当金异常，无法结算赎当");
-        }
-        if (ticket.getMonthlyRate() == null || ticket.getServiceRate() == null) {
-            throw new BizException("当票利率费率快照缺失，无法结算赎当");
-        }
-        LocalDate startDate = ticket.getStartDate();
-        if (startDate == null) {
-            throw new BizException("当票起当日期缺失，无法结算赎当");
-        }
         if (redeemedAt == null) {
             throw new BizException("赎当办理时刻缺失，不能赎当");
         }
 
-        // 计费天数：赎当日期 − 起当日期的自然日数，不足一天按一天算。
-        // 晚于到期日期来赎也照这个算，实际多少天算多少天，不额外加罚。
-        LocalDate redeemDate = redeemedAt.toLocalDate();
-        int usedDays = (int) Math.max(1L, ChronoUnit.DAYS.between(startDate, redeemDate));
-
-        // 日费率 =（月利率快照 + 月综合费率快照）÷ 30；费用 = 当金 × 日费率 × 计费天数。
-        // 一律照票面上的快照算，不读现在的费率配置；金额保留两位小数四舍五入。
-        BigDecimal dailyRate = ticket.getMonthlyRate().add(ticket.getServiceRate())
-                .divide(DAYS_PER_MONTH, 10, RoundingMode.HALF_UP);
-        BigDecimal fee = ticket.getPawnAmount()
-                .multiply(dailyRate)
-                .multiply(BigDecimal.valueOf(usedDays))
-                .setScale(2, RoundingMode.HALF_UP);
-        BigDecimal total = ticket.getPawnAmount().add(fee).setScale(2, RoundingMode.HALF_UP);
+        // 本息口径只有一套：当金 / 利率费率 / 起当日的校验，连同「晚于到期日照实际天数算、
+        // 不加罚」都抽在 RedemptionQuote 里；绝当翻单算到处置日的欠款也走它，
+        // 保证柜台真办一次与别处试算分毫不差。
+        RedemptionQuote quote = RedemptionQuote.quote(ticket, redeemedAt.toLocalDate());
 
         PawnRedeem redeem = new PawnRedeem();
         redeem.ticketId = ticket.getId();
         redeem.redeemedAt = redeemedAt;
-        redeem.usedDays = usedDays;
-        redeem.feeAmount = fee;
-        redeem.totalAmount = total;
+        redeem.usedDays = quote.usedDays();
+        redeem.feeAmount = quote.feeAmount();
+        redeem.totalAmount = quote.totalAmount();
         return redeem;
     }
 }
